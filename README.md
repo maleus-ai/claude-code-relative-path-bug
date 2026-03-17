@@ -1,61 +1,84 @@
-# Claude Code path.relative() bug reproduction
+# Claude Code `path.relative()` Bug Reproduction
 
-This repository reproduces a bug with Claude Code producing the following relative path error during Read/Write/Edit operation whether it's to update files in the Claude Code current working directory or plans inside `~/.claude/plans`
+This repository reproduces a bug where Claude Code rejects valid file paths during Read/Write/Edit operations with errors like:
+
 ```
 Error: path should be a `path.relative()`d string, but got "../README.md"
 ```
-or
+
 ```
 Updated plan
-  ⎿  Error: path should be a `path.relative()`d string, but got "../../.claude/plans/silly-stirring-floyd.md"
+  ⎿  Error: path should be a `path.relative()`d string, but got "../../.claude/plans/silly-stirring-floyd.md"
+```
+
+This affects both editing files in the project directory and creating/updating plans in `~/.claude/plans`.
+
+## Setup
+
+This repository contains 3 nearly identical scenarios, each in its own directory:
+
+| Scenario | Has Custom Skill | Skill has `paths` | Bug? |
+|---|---|---|---|
+| `no-skills/` | No | N/A | No |
+| `skill-no-path/` | Yes | No | No |
+| `skill-with-path/` | Yes | Yes | **Yes** |
+
+The only difference between `skill-no-path` and `skill-with-path` is a single line in the skill definition:
+
+```diff
+  # skill-with-path/.claude/skills/char-counter/SKILL.md
+  ---
+  name: char-counter
++ paths: "**/*.txt"
+  alwaysApply: false
+  ---
 ```
 
 ## Reproducing the Bug
 
-This repository contains 3 nearly identicals scenarios:
-- no-skills **(no bug)**
-- skill-no-path **(no bug)**
-- skill-with-path **(path.relative() bug)**
+### Scenario 1 — File editing after a `cd`
 
-The difference between **skill-no-path** and **skill-with-path**
-```diff
-skill-with-path/.claude/skills/char-counter/SKILL.md
----
-name: char-counter
-+ paths: "**/*.txt"
-alwaysApply: false
----
-...
+Run Claude Code in each of the 3 scenario directories with this prompt:
+
 ```
-
-**Scenario 1 - File edition in the same directory**
-
-Running a Claude Code instance in each folder with the following prompt gives different results 
-```
-Update the README.md "Project Description" section at the root of the project containing with generated lorem-ipsum thanks to the ./lorem-ipsum package using "npm run lorem-ipsum <length>"
+Update the README.md "Project Description" section at the root of the project
+containing with generated lorem-ipsum thanks to the ./lorem-ipsum package
+using "npm run lorem-ipsum <length>"
 
 Do not use the "--prefix" flag of npm
 ```
 
-This prompt is meant to force Claude Code to execute the `npm run lorem-ipsum` command from within the `./lorem-ipsum` directory using `cd` to have something like this `cd ./lorem-ipsup && npm run lorem-ipsum 3` and then try to update the README.md that was at root of where the CLI was first started, causing the path to relative contain `../.md` triggering the relative path rejection.
+This forces Claude Code to `cd` into the `lorem-ipsum/` subdirectory to run the npm script, then attempt to edit `README.md` back at the project root. In `skill-with-path/`, the edit fails because the path resolves to `../README.md`.
 
-**Scenario 2 - Plan creation**
+### Scenario 2 — Plan creation
 
-(Note: This scenario doesn't require having run Scenario 1 in order to be reproduced)
+Run a **new** Claude Code instance in each directory with:
 
-Running a new Claude Code instance in each folder with the following prompt gives different results 
 ```
 Plan a proper readme for this project
 ```
 
-## Potential root cause
+In `skill-with-path/`, plan creation fails because the path to `~/.claude/plans/<file>` resolves to something like `../../.claude/plans/silly-stirring-floyd.md`.
 
-It seems like the bug is caused by the `path.relative()` function being feeded the Claude Code's bash CWD instead of the path where Claude Code was first run.
-When Claude Code does move directory to execute commands using `cd` it causes the Bash CWD to change, which makes operation on files compute the relative path
-from the cwd `path.relative(bash.cwd, <file path>)`, since the `cd` has changed the directory to a subdirectory, updating files at the root of where Claude Code was run in the first place causes the path relative to output `../README.md` which triggers a check against `node-ignore` to prevent escaping the Root directory.
+> This scenario does not depend on Scenario 1.
 
-This `path.relative` check seems only triggered when there are custom skills defined with `paths` inside of them which put them in a kind of `pending` state, skills seems to become active if the file path that operated on with Read/Write/Edit is matched by the skill's path pattern, and the condition to trigger it seems to have at least 1 skill that is still `pending`.
+## Root Cause Analysis
 
-It looks like the bug also happens with `Rules` that specify `paths` but only on some different triggering condition like IDE/Memory triggers
+The bug appears to stem from Claude Code using the **bash process CWD** instead of the **original startup directory** when computing relative paths for file operations.
 
-This also affect Claude Code's ability to Read/Write/Edit inside the `~/.claude/plans` because it evaluates the path with `path.relative(bash.cwd, "~/.claude/plans/<file>")` as something like `../../.claude/plans/silly-stirring-floyd.md` triggering the path rejection too forcing it to try to bypass this restriction by using bash commands like `echo`, `cat`, etc, even creating `symlinks`
+Here is the chain of events:
+
+1. Claude Code starts in `/project/skill-with-path/`.
+2. It runs `cd ./lorem-ipsum && npm run lorem-ipsum 3`, which changes the bash CWD to `/project/skill-with-path/lorem-ipsum/`.
+3. It then tries to edit `/project/skill-with-path/README.md`.
+4. Internally, it computes `path.relative(bash.cwd, filePath)`, which yields `../README.md`.
+5. A validation check (via `node-ignore`) rejects paths that start with `..`, so the edit fails.
+
+### Trigger conditions
+
+This validation only runs when **at least one custom skill has a `paths` field** and is in a "pending" state (i.e., no file matching its pattern has been operated on yet). Without such a skill, the path check is skipped entirely — which is why `no-skills/` and `skill-no-path/` work fine.
+
+### Additional effects
+
+- **Plans**: The same issue prevents Claude Code from reading/writing files in `~/.claude/plans/`, since `path.relative(bash.cwd, "~/.claude/plans/...")` produces paths like `../../.claude/plans/...`. Claude Code then resorts to workarounds like `echo`, `cat`, or even symlinks to bypass the restriction.
+- **Rules with `paths`**: The bug also appears with Rules that specify `paths`, though it may require different triggers (e.g., IDE or memory triggers).
