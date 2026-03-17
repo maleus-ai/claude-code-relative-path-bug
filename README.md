@@ -15,9 +15,9 @@ This affects both editing files in the project directory and creating/updating p
 
 ## Setup
 
-This repository contains 3 nearly identical scenarios, each in its own directory:
+This repository contains 3 nearly identical setups, each in its own directory:
 
-| Scenario | Has Custom Skill | Skill has `paths` | Bug? |
+| Setup | Has Custom Skill | Skill has `paths` | Bug? |
 |---|---|---|---|
 | `no-skills/` | No | N/A | No |
 | `skill-no-path/` | Yes | No | No |
